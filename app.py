@@ -1,10 +1,13 @@
 from flask import Flask, request, redirect
 import psycopg2
+import redis
 import string
 import random
 from urllib.parse import urlparse
 
 app = Flask(__name__)
+
+r = redis.Redis(host='redis', port=6379, db=0, decode_responses=True)
 
 def get_db():
     return psycopg2.connect(
@@ -18,8 +21,6 @@ def get_db():
 def index():
     if request.method == 'POST':
         long_url = request.form['url']
-        
-        # Проверка на корректный URL
         parsed_url = urlparse(long_url)
         if not parsed_url.scheme or not parsed_url.netloc:
             return "Ошибка: Вы ввели не похоже на ссылку. Не забудьте http:// или https://", 400
@@ -45,6 +46,17 @@ def index():
 
 @app.route('/<short_code>')
 def redirect_to_long(short_code):
+    print(f"--- ПОИСК ССЫЛКИ: {short_code} ---")
+    
+    # 1. Проверяем Redis
+    cached_url = r.get(short_code)
+    if cached_url:
+        print("!!! ВЗЯТО ИЗ КЭША !!!")
+        return redirect(cached_url)
+
+    print("В кэше нет. Идем в базу...")
+    
+    # 2. Идем в PostgreSQL
     conn = get_db()
     cur = conn.cursor()
     cur.execute("SELECT long FROM links WHERE short = %s", (short_code,))
@@ -53,7 +65,16 @@ def redirect_to_long(short_code):
     conn.close()
     
     if result:
-        return redirect(result[0])
+        long_url = result[0]
+        print(f"Найдено в базе: {long_url}")
+        
+        # 3. Сохраняем в Redis
+        r.setex(short_code, 3600, long_url)
+        print("Сохранено в Redis!")
+        
+        return redirect(long_url)
+        
+    print("Ссылка не найдена в базе")
     return "Ссылка не найдена", 404
 
 if __name__ == '__main__':
